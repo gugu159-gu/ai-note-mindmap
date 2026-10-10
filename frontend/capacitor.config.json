@@ -1,0 +1,13 @@
+{
+  "appId": "com.ainotes.app",
+  "appName": "AI笔记工具",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true,
+    "backgroundColor": "#f4f6fb"
+  }
+}

@@ -1,0 +1,4 @@
+# 可选：图片拍照 OCR（中文）
+# rapidocr 3.x + onnxruntime（abi3 轮子），Python 3.13/3.14 均可安装。
+rapidocr>=3.0
+onnxruntime>=1.19

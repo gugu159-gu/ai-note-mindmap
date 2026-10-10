@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>本地引擎自检</title>
+  <style>
+    body { font-family: "Microsoft YaHei", system-ui, sans-serif; padding: 16px; }
+    #out { white-space: pre-wrap; font-size: 13px; line-height: 1.7; }
+    .ok { color: #1e7d46; }
+    .fail { color: #c0392b; }
+  </style>
+</head>
+<body>
+  <h1>本地独立模式 · 自检</h1>
+  <pre id="out">running...</pre>
+  <script type="module">
+    const out = document.getElementById('out')
+    const lines = []
+    let pass = 0, fail = 0
+    const log = (s) => { lines.push(s); out.textContent = lines.join('\n') }
+    const check = (name, cond, extra = '') => {
+      if (cond) { pass++; log(`PASS ${name}${extra ? ' :: ' + extra : ''}`) }
+      else { fail++; log(`FAIL ${name}${extra ? ' :: ' + extra : ''}`) }
+    }
+
+    try {
+      // 切到本机独立模式
+      localStorage.setItem('ai_notes_mode', 'local')
+      const { api } = await import('/src/api.js')
+      const { isLocalMode } = await import('/src/mode.js')
+      check('模式切换为本机独立', isLocalMode() === true)
+
+      // 清理上次运行残留
+      for (const t of await api.listTasks()) await api.deleteTask(t.id)
+
+      // 1. 本机档案
+      const me = await api.me()
+      check('本机档案可用', me && me.local === true, `username=${me.username}`)
+
+      // 2. 上传文本文件 → 解析 → 兜底提取 → 生成复习计划
+      const text = [
+        '# 第一章 软件过程',
+        '软件过程是软件生命周期中的一系列活动',
+        '- 需求分析',
+        '- 设计',
+        '- 编码与测试',
+        '1.1 过程模型',
+        '瀑布模型：阶段化、文档驱动',
+        '增量模型：分批交付',
+        '# 第二章 需求工程',
+        '需求获取方法：访谈、问卷、原型',
+        '需求规格说明书的编写',
+      ].join('\n')
+      const file = new File([text], 'demo_local.txt', { type: 'text/plain' })
+      const task = await api.upload(file)
+      check('上传+解析成功', task.status === 'done', `status=${task.status} err=${task.error || '-'}`)
+      check('生成了复习项', task.review_items > 0, `review_items=${task.review_items}`)
+      check('大纲已生成', (task.outline || '').includes('# 第一章 软件过程'))
+      const root = task.knowledge?.title
+      check('知识点树有根节点', !!root, `root=${root}`)
+      check('章节数 ≥ 2', (task.knowledge?.children || []).length >= 2,
+        `children=${(task.knowledge?.children || []).map(c => c.title).join('|')}`)
+
+      // 3. 任务列表（本机存储）
+      const tasks = await api.listTasks()
+      check('任务写入本地库', tasks.length === 1, `tasks=${tasks.length}`)
+
+      // 4. 复习总览：首次复习在 1 天后 → 现在不该有到期项
+      const summary1 = await api.reviewSummary()
+      check('复习总览统计正确', summary1.total === task.review_items, `total=${summary1.total}/${task.review_items}`)
+      check('间隔表正确', JSON.stringify(summary1.intervals) === JSON.stringify([1, 2, 4, 7, 15, 30]),
+        summary1.intervals_label)
+      const due1 = await api.reviewDue()
+      check('当前无到期复习', due1.length === 0, `due=${due1.length}`)
+
+      // 5. 重置一条 → 立即到期 → 完成一次 → 推进到 +2 天
+      const items = await api.reviewList(task.id)
+      check('复习项可按任务查询', items.length === task.review_items, `items=${items.length}`)
+      const first = items[0]
+      await api.reviewReset(first.id)
+      const due2 = await api.reviewDue()
+      check('重置后立即到期', due2.some(d => d.id === first.id), `due=${due2.length}`)
+      const done = await api.reviewComplete(first.id)
+      check('完成一次复习后 stage=1', done.stage === 1, `stage=${done.stage}/${done.max_stage}`)
+      const after = (await api.reviewList(task.id)).find(i => i.id === first.id)
+      const dayMs = 24 * 3600 * 1000
+      const gap = Math.round((new Date(after.next_review_at.replace(' ', 'T')) - Date.now()) / dayMs)
+      check('下次复习约在 2 天后', gap === 2, `gap=${gap} 天 (${after.next_review_at})`)
+
+      // 6. 进度统计
+      await api.reviewMaster(items[1] ? items[1].id : first.id)
+      const progress = await api.reviewProgress()
+      check('按课件进度可用', progress.length === 1, JSON.stringify({
+        percent: progress[0].percent, mastered: progress[0].mastered, total: progress[0].total,
+      }))
+      const summary2 = await api.reviewSummary()
+      check('进度百分比已更新', summary2.progress_percent > 0, `progress=${summary2.progress_percent}%`)
+
+      // 7. 未来安排
+      const upcoming = await api.reviewUpcoming(7)
+      check('未来 7 天安排可用', upcoming.length >= 1, upcoming.map(g => `${g.label}:${g.count}`).join(' '))
+
+      // 8. 备份导出/导入
+      const backup = await api.exportAll()
+      check('备份导出包含数据', backup.tasks.length === 1 && backup.reviews.length > 0,
+        `tasks=${backup.tasks.length} reviews=${backup.reviews.length}`)
+      const imported = await api.importAll(backup)
+      check('备份导入幂等', imported.tasks === 1, JSON.stringify(imported))
+
+      // 9. 删除任务联动清理复习项
+      const del = await api.deleteTask(task.id)
+      check('删除任务清理复习项', del.removed_review_items > 0, `removed=${del.removed_review_items}`)
+      check('删除后任务为空', (await api.listTasks()).length === 0)
+      check('删除后复习项为空', (await api.reviewSummary()).total === 0)
+    } catch (e) {
+      fail++
+      log('EXCEPTION ' + (e && e.stack ? e.stack : e))
+    }
+
+    log(`\nRESULT ${pass}/${pass + fail} passed, ${fail} failed`)
+    document.title = `SELFTEST ${pass}/${pass + fail}`
+  </script>
+</body>
+</html>
